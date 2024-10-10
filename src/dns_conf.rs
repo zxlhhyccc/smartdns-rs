@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use crate::config::*;
+use crate::dns::DomainRuleGetter;
 use crate::log;
 use crate::{
     dns_rule::{DomainRuleMap, DomainRuleTreeNode},
@@ -257,10 +258,16 @@ impl RuntimeConfig {
         self.cache.size.unwrap_or(512)
     }
 
-    ///  enable persist cache when restart
+    /// enable persist cache when restart
     #[inline]
     pub fn cache_persist(&self) -> bool {
         self.cache.persist.unwrap_or(false)
+    }
+
+    /// cache save interval
+    #[inline]
+    pub fn cache_checkpoint_time(&self) -> u64 {
+        self.cache.checkpoint_time.unwrap_or(24 * 60 * 60)
     }
 
     /// cache persist file
@@ -384,8 +391,7 @@ impl RuntimeConfig {
 
     #[inline]
     pub fn local_ttl(&self) -> u64 {
-        self.local_ttl
-            .unwrap_or_else(|| self.rr_ttl_min().unwrap_or_default())
+        self.local_ttl.or_else(|| self.rr_ttl_min()).unwrap_or(10)
     }
 
     /// Maximum number of IPs returned to the client|8|number of IPs, 1~16
@@ -537,7 +543,7 @@ impl RuntimeConfig {
         &self.cnames
     }
 
-    pub fn valid_nftsets(&self) -> Vec<&ConfigForIP<NftsetConfig>> {
+    pub fn valid_nftsets(&self) -> Vec<&ConfigForIP<NFTsetConfig>> {
         self.nftsets
             .iter()
             .flat_map(|x| &x.config)
@@ -618,6 +624,8 @@ impl RuntimeConfigBuilder {
             &cfg.forward_rules,
             &domain_sets,
             &cfg.cnames,
+            &cfg.srv_records,
+            &cfg.https_records,
             &cfg.nftsets,
         );
 
@@ -741,7 +749,7 @@ impl RuntimeConfigBuilder {
     }
 
     pub fn load_file<P: AsRef<Path>>(&mut self, path: P) -> Result<(), Box<dyn std::error::Error>> {
-        let path = find_path(path, self.conf_file.as_ref());
+        let path = resolve_filepath(path, self.conf_file.as_ref());
 
         if path.exists() {
             if self.conf_file.is_none() {
@@ -780,9 +788,11 @@ impl RuntimeConfigBuilder {
                 BindCertKeyPass(v) => self.bind_cert_key_pass = Some(v),
                 CacheFile(v) => self.cache.file = Some(v),
                 CachePersist(v) => self.cache.persist = Some(v),
-                CName(v) => self.cnames.push(v),
+                CacheCheckpointTime(v) => self.cache.checkpoint_time = Some(v),
+                CNAME(v) => self.cnames.push(v),
                 ExpandPtrFromAddress(v) => self.expand_ptr_from_address = Some(v),
-                NftSet(config) => self.nftsets.push(config),
+                NftSet(v) => self.nftsets.push(v),
+                HttpsRecord(v) => self.https_records.push(v),
                 Server(server) => self.nameservers.push(server),
                 ResponseMode(mode) => self.response_mode = Some(mode),
                 ResolvHostname(v) => self.resolv_hostname = Some(v),
@@ -825,6 +835,7 @@ impl RuntimeConfigBuilder {
                 ConfFile(v) => self.load_file(v).expect("load_file failed"),
                 DnsmasqLeaseFile(v) => self.dnsmasq_lease_file = Some(v),
                 ResolvFile(v) => self.resolv_file = Some(v),
+                SrvRecord(v) => self.srv_records.push(v),
                 DomainRule(v) => self.domain_rules.push(v),
                 ForwardRule(v) => self.forward_rules.push(v),
                 User(v) => self.user = Some(v),
@@ -834,7 +845,7 @@ impl RuntimeConfigBuilder {
                 DomainSetProvider(mut v) => {
                     use crate::config::DomainSetProvider;
                     if let DomainSetProvider::File(provider) = &mut v {
-                        provider.file = find_path(&provider.file, self.conf_file.as_ref());
+                        provider.file = resolve_filepath(&provider.file, self.conf_file.as_ref());
                     }
                     self.domain_set_providers
                         .entry(v.name().to_string())
@@ -856,33 +867,67 @@ impl RuntimeConfigBuilder {
     }
 }
 
-pub fn find_path<P: AsRef<Path>>(path: P, base_conf_file: Option<&PathBuf>) -> PathBuf {
-    let mut path = path.as_ref().to_path_buf();
-    if !path.exists() && !path.is_absolute() {
-        if let Some(base_conf_file) = base_conf_file {
-            if let Some(parent) = base_conf_file.parent() {
-                let mut new_path = parent.join(path.as_path());
+fn resolve_filepath<P: AsRef<Path>>(filepath: P, base_file: Option<&PathBuf>) -> PathBuf {
+    let filepath = filepath.as_ref();
+    if filepath.is_file() {
+        return filepath.to_path_buf();
+    }
 
-                if !new_path.exists()
-                    && matches!(base_conf_file.file_name(), Some(file_name) if file_name == OsStr::new("smartdns.conf"))
+    if !filepath.is_absolute() {
+        if let Some(base_conf_file) = base_file {
+            if let Some(dir) = base_conf_file.parent() {
+                let new_path = dir.join(filepath);
+
+                if new_path.is_file() {
+                    return new_path;
+                }
+
+                if matches!(base_conf_file.file_name(), Some(file_name) if file_name == OsStr::new("smartdns.conf"))
                 {
                     // eg: /etc/smartdns.d/custom.conf
-                    new_path = parent.join("smartdns.d").join(path.as_path());
+                    let new_path = dir.join("smartdns.d").join(filepath);
+
+                    if new_path.is_file() {
+                        return new_path;
+                    }
                 }
 
-                if new_path.exists() {
-                    path = new_path;
+                if let Ok(new_path) = std::env::current_dir().map(|dir| dir.join(filepath)) {
+                    if new_path.is_file() {
+                        return new_path;
+                    }
                 }
+
+                if let Some(new_path) = std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(|dir| dir.join(filepath)))
+                {
+                    if new_path.is_file() {
+                        return new_path;
+                    }
+                }
+            }
+        }
+    } else {
+        // try to resolve absolute path by extracting its file_name
+        if let Some(new_path) = filepath.file_name().map(|f| resolve_filepath(f, base_file)) {
+            if new_path.is_file() {
+                log::warn!(
+                    "File {} not found, but {} found",
+                    filepath.display(),
+                    new_path.display()
+                );
+                return new_path;
             }
         }
     }
 
-    path
+    filepath.to_path_buf()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::libdns::resolver::config::Protocol;
+    use crate::{dns::DomainRuleGetter, libdns::Protocol};
     use byte_unit::Byte;
 
     use crate::config::{HttpsListenerConfig, ListenerAddress, ServerOpts, SslConfig};
@@ -1217,13 +1262,13 @@ mod tests {
 
         assert_eq!(
             cfg.find_domain_rule(&"cloudflare.com".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             Some(DomainAddress::SOA)
         );
 
         assert_eq!(
             cfg.find_domain_rule(&"google.com".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             Some(DomainAddress::IGN)
         );
     }
@@ -1235,13 +1280,13 @@ mod tests {
             .build();
         assert_eq!(
             cfg.find_domain_rule(&"example.com".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             Some(DomainAddress::SOA)
         );
 
         assert_eq!(
             cfg.find_domain_rule(&"aa.example.com".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             None
         );
     }
@@ -1251,13 +1296,13 @@ mod tests {
         let cfg = RuntimeConfig::builder().with("address /*/#").build();
         assert_eq!(
             cfg.find_domain_rule(&"localhost".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             Some(DomainAddress::SOA)
         );
 
         assert_eq!(
             cfg.find_domain_rule(&"aa.example.com".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             None
         );
     }
@@ -1267,13 +1312,13 @@ mod tests {
         let cfg = RuntimeConfig::builder().with("address /+/#").build();
         assert_eq!(
             cfg.find_domain_rule(&"localhost".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             Some(DomainAddress::SOA)
         );
 
         assert_eq!(
             cfg.find_domain_rule(&"aa.example.com".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             Some(DomainAddress::SOA)
         );
     }
@@ -1283,13 +1328,13 @@ mod tests {
         let cfg = RuntimeConfig::builder().with("address /./#").build();
         assert_eq!(
             cfg.find_domain_rule(&"localhost".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             Some(DomainAddress::SOA)
         );
 
         assert_eq!(
             cfg.find_domain_rule(&"aa.example.com".parse().unwrap())
-                .and_then(|r| r.get(|n| n.address)),
+                .get(|n| n.address),
             Some(DomainAddress::SOA)
         );
     }
@@ -1488,5 +1533,12 @@ mod tests {
         assert!(!domain_set.contains(&"ads2c.cn".parse().unwrap()));
         // assert!(domain_set.is_match(&Name::from_str("ads3.net").unwrap().into()));
         // assert!(domain_set.is_match(&Name::from_str("q.ads3.net").unwrap().into()));
+    }
+
+    #[test]
+    fn test_parse_https_record() {
+        let cfg = RuntimeConfig::builder().with("https-record #").build();
+        assert_eq!(cfg.https_records.len(), 1);
+        assert_eq!(cfg.https_records[0].config, HttpsRecordRule::SOA);
     }
 }
