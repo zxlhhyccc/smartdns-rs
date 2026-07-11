@@ -1,116 +1,117 @@
-use std::{io, net::SocketAddr, sync::Arc};
-
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
-use axum_server::{tls_rustls::RustlsConfig, Handle};
+use cfg_if::cfg_if;
+use http::{HeaderValue, header};
+use openapi::Router;
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
+use std::sync::Arc;
+use tower::ServiceBuilder;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 mod address;
 mod audit;
 mod cache;
+mod config;
 mod forward;
 mod listener;
 mod log;
 mod nameserver;
+mod openapi;
 mod serve_dns;
-mod settings;
+mod system;
 
-use crate::rustls::{Certificate, PrivateKey};
 use crate::{app::App, server::DnsHandle};
 
 type StatefulRouter = Router<Arc<ServeState>>;
+pub use openapi::ToSchema;
 
 pub struct ServeState {
-    app: Arc<App>,
-    dns_handle: DnsHandle,
+    pub app: App,
+    pub dns_handle: DnsHandle,
 }
 
-pub async fn serve(
-    app: Arc<App>,
-    dns_handle: DnsHandle,
-    tcp_listener: TcpListener,
-    certificate: Vec<Certificate>,
-    certificate_key: PrivateKey,
-) -> io::Result<CancellationToken> {
-    let token = CancellationToken::new();
-    let cancellation_token = token.clone();
-
-    let state = Arc::new(ServeState { app, dns_handle });
-
-    let app = Router::new()
+pub fn routes() -> axum::Router<Arc<ServeState>> {
+    use utoipa::openapi::InfoBuilder;
+    let (router, mut openapi) = Router::new()
         .merge(serve_dns::routes())
         .nest("/api", api_routes())
-        .with_state(state.clone())
-        .into_make_service_with_connect_info::<SocketAddr>();
+        .split_for_parts();
+    openapi.info = InfoBuilder::new()
+        .title(crate::NAME)
+        .version(crate::BUILD_VERSION)
+        .build();
 
-    let certificate = certificate
-        .into_iter()
-        .map(|c| c.as_ref().to_vec())
-        .collect::<Vec<_>>();
-    let certificate_key = certificate_key.secret_der().to_vec();
+    let router = {
+        cfg_if! {
+            if #[cfg(feature = "swagger-ui-cdn")]
+            {
+                router.merge(openapi::swagger_cdn("/api/docs", "/api/openapi.json", openapi, None))
+            }
+            else if #[cfg(feature = "swagger-ui-embed")]
+            {
+                use utoipa_swagger_ui::{Config, SwaggerUi};
+                router.merge(
+                    SwaggerUi::new("/api/docs")
+                        .config(
+                            Config::default()
+                                .show_extensions(true)
+                                .show_common_extensions(true)
+                                .use_base_layout(),
+                        )
+                        .url("/api/openapi.json", openapi),
+                )
+            } else {
+                router
+            }
+        }
+    };
 
-    let tcp_listener = tcp_listener.into_std()?;
-    let rustls_config = RustlsConfig::from_der(certificate, certificate_key).await?;
-
-    tokio::spawn(async move {
-        use crate::log;
-        let shutdown_handle = Handle::new();
-
-        tokio::select! {
-            result = axum_server::from_tcp_rustls(
-                tcp_listener,
-                rustls_config,
-            )
-            .handle(shutdown_handle.clone())
-            .serve(app) => match result {
-                Ok(()) => (),
-                Err(e) => {
-                    log::debug!("error receiving quic connection: {e}");
-                }
-            },
-            _ = cancellation_token.cancelled() => {
-                // A graceful shutdown was initiated. Break out of the loop.
-                shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)))
-            },
-        };
-    });
-
-    Ok(token)
+    router.layer(
+        ServiceBuilder::new().layer(SetResponseHeaderLayer::overriding(
+            header::SERVER,
+            HeaderValue::from_static(crate::NAME),
+        )),
+    )
 }
 
 fn api_routes() -> StatefulRouter {
     Router::new()
         .route("/version", get(version))
         .merge(cache::routes())
+        .merge(config::routes())
         .merge(nameserver::routes())
         .merge(address::routes())
         .merge(forward::routes())
-        .merge(settings::routes())
         .merge(audit::routes())
         .merge(listener::routes())
         .merge(log::routes())
+        .merge(system::routes())
 }
 
 async fn version() -> Json<&'static str> {
-    Json(crate::version())
+    Json(crate::BUILD_VERSION)
 }
 
-struct ApiError(anyhow::Error);
+enum ApiError {
+    Internal(anyhow::Error),
+    NotFound(String),
+}
 
 // Tell axum how to convert `AppError` into a response.
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Something went wrong: {}", self.0),
-        )
-            .into_response()
+        match self {
+            ApiError::Internal(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Something went wrong: {error}"),
+            )
+                .into_response(),
+            ApiError::NotFound(err) => (StatusCode::NOT_FOUND, err).into_response(),
+        }
     }
 }
 
@@ -121,7 +122,7 @@ where
     E: Into<anyhow::Error>,
 {
     fn from(err: E) -> Self {
-        Self(err.into())
+        Self::Internal(err.into())
     }
 }
 
@@ -129,10 +130,15 @@ impl IntoResponse for crate::dns::DnsError {
     fn into_response(self) -> Response {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!(r#"{{ "error": "{0}" }}"#, self),
+            format!(r#"{{ "error": "{self}" }}"#),
         )
             .into_response()
     }
+}
+
+#[derive(Deserialize, Serialize)]
+struct DataPayload<T> {
+    data: T,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -150,13 +156,8 @@ impl<T> DataListPayload<T> {
     }
 }
 
-trait IntoDataListPayload<T> {
-    fn into_data_list_payload(self) -> DataListPayload<T>;
-}
-
-impl<T> IntoDataListPayload<T> for Vec<T> {
-    #[inline]
-    fn into_data_list_payload(self) -> DataListPayload<T> {
-        DataListPayload::new(self)
+impl<T> From<Vec<T>> for DataListPayload<T> {
+    fn from(data: Vec<T>) -> Self {
+        Self::new(data)
     }
 }

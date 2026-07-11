@@ -1,11 +1,12 @@
 # SmartDNS-rs
 
 ![Test](https://github.com/mokeyish/smartdns-rs/actions/workflows/test.yml/badge.svg?branch=main)
+[![Crates.io Version](https://img.shields.io/crates/v/smartdns.svg)](https://crates.io/crates/smartdns)
 [![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/mokeyish/smartdns-rs?display_name=tag&include_prereleases)](https://github.com/mokeyish/smartdns-rs/releases)
 [![homebrew version](https://img.shields.io/homebrew/v/smartdns)](https://formulae.brew.sh/formula/smartdns)
 ![OS](https://img.shields.io/badge/os-Windows%20%7C%20MacOS%20%7C%20Linux-blue)
 
-[Docs](https://pymumu.github.io/smartdns/en/) • [Discord](https://discord.gg/SDhQSA72)
+[Docs](https://pymumu.github.io/smartdns/en/) •
 
 English | [中文](https://github.com/mokeyish/smartdns-rs/blob/main/README_zh-CN.md)
 
@@ -87,7 +88,7 @@ Please refer to [TODO](https://github.com/mokeyish/smartdns-rs/blob/main/TODO.md
   1. Get help
 
      ```shell
-     ./smartdns help
+     ./smartdns --help
      ```
 
   2. Run as foreground, easy to check the running status
@@ -103,7 +104,7 @@ Please refer to [TODO](https://github.com/mokeyish/smartdns-rs/blob/main/TODO.md
      Get help of service management commands.
 
      ```shell
-     ./smartdns service help
+     ./smartdns service --help
      ```
 
      *Note: Installed as a system service, administrator / root permissions are required.*
@@ -124,7 +125,7 @@ server https://1.1.1.1/dns-query  -bootstrap-dns -exclude-default-group
 server https://8.8.8.8/dns-query  -bootstrap-dns -exclude-default-group
 
 # Configure default upstream server
-server https://cloudflare-dns/dns-query
+server https://cloudflare-dns.com/dns-query
 server https://dns.quad9.net/dns-query
 server https://dns.google/dns-query
 
@@ -149,6 +150,41 @@ server-quic unfiltered.adguard-dns.com
 ```
 
 For more advanced configurations, please refer to [here](https://github.com/pymumu/smartdns/blob/doc/en/docs/configuration.md) , and refer to [TODO](https://github.com/mokeyish/smartdns-rs/blob/main/TODO.md) for the function coverage.
+
+## Built-in diagnostics via `dig`
+
+SmartDNS-rs supports built-in `CHAOS TXT` queries for server/client diagnostics.
+
+```shell
+# most common: full identity info (server + client, multi TXT records)
+dig @127.0.0.1 CH TXT whoami +short
+
+# server identity info only (multi TXT records)
+dig @127.0.0.1 CH TXT smartdns +short
+
+# server name
+dig @127.0.0.1 CH TXT server-name +short
+
+# server version
+dig @127.0.0.1 CH TXT version +short
+
+# client source IP seen by smartdns-rs
+dig @127.0.0.1 CH TXT client_ip +short
+dig @127.0.0.1 CH TXT client-ip +short
+
+# client MAC from ARP table (LAN, ARP available)
+dig @127.0.0.1 CH TXT client_mac +short
+dig @127.0.0.1 CH TXT client-mac +short
+
+# JSON output with suffix style
+dig @127.0.0.1 CH TXT whoami.json +short
+dig @127.0.0.1 CH TXT smartdns.json +short
+
+# Compatibility examples
+dig @127.0.0.1 CH TXT hostname.bind +short
+dig @127.0.0.1 CH TXT version.bind +short
+dig @127.0.0.1 CH TXT id.server +short
+```
 
 ## Building
 

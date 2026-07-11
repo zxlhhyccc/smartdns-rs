@@ -33,11 +33,20 @@ jobs:
 
       - name: Setup
         uses: ./.github/actions/setup
+        with:
+          rust_target: ${{ matrix.target }}
 
       - name: Test
         run: just test --features=disable_icmp_ping
         env:
           USE_CROSS: ${{ matrix.os == 'ubuntu-latest' }}
+
+      - name: Setup upterm session for debugging
+        uses: lhotari/action-upterm@v1
+        if: ${{ failure() }}
+        with:
+          limit-access-to-actor: true
+          wait-timeout-minutes: 5
 
   cleanliness:
     name: cleanliness ${{ matrix.target }}
@@ -58,6 +67,8 @@ jobs:
 
       - name: Setup
         uses: ./.github/actions/setup
+        with:
+          rust_target: ${{ matrix.target }}
 
       - name: Install Rust Toolchain Components
         uses: dtolnay/rust-toolchain@stable
@@ -146,6 +157,8 @@ jobs:
 
       - name: Setup
         uses: ./.github/actions/setup
+        with:
+          rust_target: ${{ matrix.target }}
 
       - name: Check
         run: just check --target ${{ matrix.target }}

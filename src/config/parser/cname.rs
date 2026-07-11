@@ -1,11 +1,12 @@
 use super::*;
 
-impl NomParser for CName {
+impl NomParser for CNameRule {
     fn parse(input: &str) -> IResult<&str, Self> {
         alt((
-            value(CName::IGN, char('-')),
-            map(NomParser::parse, CName::Value),
-        ))(input)
+            value(CNameRule::Ignore, char('-')),
+            map(NomParser::parse, CNameRule::Value),
+        ))
+        .parse(input)
     }
 }
 
@@ -16,10 +17,10 @@ mod tests {
 
     #[test]
     fn test() {
-        assert_eq!(CName::parse("-"), Ok(("", CName::IGN)));
+        assert_eq!(CNameRule::parse("-"), Ok(("", CNameRule::Ignore)));
         assert_eq!(
-            CName::parse("example.com"),
-            Ok(("", CName::Value("example.com".parse().unwrap())))
+            CNameRule::parse("example.com"),
+            Ok(("", CNameRule::Value("example.com".parse().unwrap())))
         );
     }
 }

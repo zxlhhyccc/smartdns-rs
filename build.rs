@@ -14,10 +14,7 @@ fn build_nftset() -> anyhow::Result<()> {
     }
 
     let mut build = cc::Build::new();
-    build
-        .file("include/nftset.c")
-        .static_flag(true)
-        .warnings(false);
+    build.file("include/nftset.c").warnings(false);
 
     if target.ends_with("-musl") {
         let target_dir = env::var_os("OUT_DIR").unwrap();
@@ -67,7 +64,7 @@ fn download<P: AsRef<Path> + Copy>(url: &str, file_path: P) -> bool {
         return false;
     }
 
-    let rest = http::get(url).unwrap_or_else(|_| panic!("URL: {} download failed!!!", url));
+    let rest = http::get(url).unwrap_or_else(|_| panic!("URL: {url} download failed!!!"));
 
     let bytes = rest.bytes().expect("read bytes from server failed!!!");
 
@@ -111,6 +108,31 @@ fn download_resources() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn create_build_time_vars() -> anyhow::Result<()> {
+    let target_dir = env::var_os("OUT_DIR").unwrap();
+    let target_dir = Path::new(&target_dir);
+    let build_file = target_dir.join("build_time_vars.rs");
+    let mut file = File::create(build_file)?;
+    let build_timestamp = chrono::Utc::now().timestamp_millis();
+    writeln!(
+        file,
+        r#"pub const BUILD_DATE: chrono::DateTime<chrono::Utc> = chrono::DateTime::from_timestamp_millis({build_timestamp}).unwrap();"#
+    )?;
+
+    writeln!(
+        file,
+        r#"pub const BUILD_TARGET: &str = "{}";"#,
+        env::var("TARGET").unwrap()
+    )?;
+
+    writeln!(
+        file,
+        r#"pub const BUILD_VERSION: &str = "{}";"#,
+        env::var("CARGO_PKG_VERSION").unwrap()
+    )?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all("./logs")?;
 
@@ -119,14 +141,6 @@ fn main() -> anyhow::Result<()> {
 
     download_resources()?;
 
-    println!(
-        "cargo:rustc-env=CARGO_BUILD_DATE={}",
-        chrono::Utc::now().format("🕙 %a %b %d %T UTC %Y")
-    );
-
-    println!(
-        "cargo:rustc-env=CARGO_BUILD_TARGET={}",
-        env::var("TARGET").unwrap()
-    );
+    create_build_time_vars()?;
     Ok(())
 }

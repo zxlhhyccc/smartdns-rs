@@ -26,10 +26,15 @@ pub struct LogConfig {
     pub num: Option<u64>,
 
     /// log file mode
-
     #[serde(with = "serde_opt_str")]
     pub file_mode: Option<FileMode>,
 
     /// log filter
     pub filter: Option<String>,
+}
+
+impl LogConfig {
+    pub fn console(&self) -> bool {
+        self.console.unwrap_or(true)
+    }
 }

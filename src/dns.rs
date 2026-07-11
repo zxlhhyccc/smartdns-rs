@@ -1,5 +1,6 @@
 #![allow(unused_imports)]
 
+use std::borrow::Borrow;
 use std::fmt::Debug;
 
 use std::net::IpAddr;
@@ -11,16 +12,16 @@ use crate::dns_rule::DomainRuleTreeNode;
 use crate::config::ServerOpts;
 use crate::dns_conf::RuntimeConfig;
 
+pub use crate::dns_rule::DomainRuleGetter;
+
 pub use crate::libdns::proto::{
-    error::ProtoErrorKind,
-    op,
-    rr::{self, rdata::SOA, Name, RData, Record, RecordType},
+    ProtoErrorKind, op,
+    rr::{self, Name, RData, Record, RecordType, rdata::SOA},
 };
 
-pub use crate::libdns::resolver::{
-    config::{NameServerConfig, NameServerConfigGroup, Protocol},
-    error::{ResolveError, ResolveErrorKind},
-    lookup::Lookup,
+pub use crate::libdns::{
+    proto::xfer::Protocol,
+    resolver::{config::NameServerConfig, lookup::Lookup},
 };
 
 #[derive(Clone)]
@@ -35,12 +36,10 @@ pub struct DnsContext {
 
 impl DnsContext {
     pub fn new(name: &Name, cfg: Arc<RuntimeConfig>, server_opts: ServerOpts) -> Self {
-        let domain_rule = cfg.find_domain_rule(name);
+        let group_name = server_opts.rule_group.as_deref().unwrap_or_default();
+        let domain_rule = cfg.find_domain_rule(name, group_name);
 
-        let no_cache = domain_rule
-            .as_ref()
-            .and_then(|r| r.get(|n| n.no_cache))
-            .unwrap_or_default();
+        let no_cache = domain_rule.get(|n| n.no_cache).unwrap_or_default();
 
         DnsContext {
             cfg,
@@ -97,8 +96,8 @@ impl Debug for LookupFrom {
             Self::None => write!(f, "None"),
             Self::Cache => write!(f, "Cache"),
             Self::Static => write!(f, "Static"),
-            Self::Zone(arg0) => write!(f, "Zone: {}", arg0),
-            Self::Server(arg0) => write!(f, "Server: {}", arg0),
+            Self::Zone(arg0) => write!(f, "Zone: {arg0}"),
+            Self::Server(arg0) => write!(f, "Server: {arg0}"),
         }
     }
 }
@@ -113,8 +112,8 @@ impl Default for LookupFrom {
 mod serial_message {
 
     use crate::dns_error::LookupError;
-    use crate::libdns::proto::error::ProtoError;
     use crate::libdns::Protocol;
+    use crate::libdns::proto::{ProtoError, op::Query};
     use crate::{config::ServerOpts, libdns::proto::op::Message};
     use bytes::Bytes;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -122,7 +121,7 @@ mod serial_message {
     use super::{DnsRequest, DnsResponse};
 
     pub enum SerialMessage {
-        Raw(Message, SocketAddr, Protocol),
+        Raw(Box<Message>, SocketAddr, Protocol),
         Bytes(Vec<u8>, SocketAddr, Protocol),
     }
 
@@ -131,7 +130,7 @@ mod serial_message {
             Self::Bytes(bytes, addr, protocol)
         }
         pub fn raw(message: Message, addr: SocketAddr, protocol: Protocol) -> Self {
-            Self::Raw(message, addr, protocol)
+            Self::Raw(message.into(), addr, protocol)
         }
 
         pub fn is_binray(&self) -> bool {
@@ -150,6 +149,14 @@ mod serial_message {
                 SerialMessage::Raw(_, a, _) => *a,
                 SerialMessage::Bytes(_, a, _) => *a,
             }
+        }
+    }
+
+    impl From<Query> for SerialMessage {
+        fn from(query: Query) -> Self {
+            let mut message = Message::query();
+            message.add_query(query);
+            message.into()
         }
     }
 
@@ -199,7 +206,7 @@ mod serial_message {
 
         fn try_from(value: SerialMessage) -> Result<Self, Self::Error> {
             match value {
-                SerialMessage::Raw(message, _, _) => Ok(message),
+                SerialMessage::Raw(message, _, _) => Ok(message.as_ref().clone()),
                 SerialMessage::Bytes(bytes, _, _) => Message::from_vec(&bytes),
             }
         }
@@ -208,15 +215,15 @@ mod serial_message {
 
 mod request {
 
-    use std::{net::SocketAddr, ops::Deref, sync::Arc};
+    use std::{fmt::Debug, net::SocketAddr, ops::Deref, sync::Arc};
 
     use crate::libdns::{
+        Protocol,
         proto::{
-            error::ProtoError,
+            ProtoError,
             op::{LowerQuery, Message, Query},
             rr::{Name, RecordType},
         },
-        Protocol,
     };
 
     use super::{DnsError, SerialMessage};
@@ -236,7 +243,7 @@ mod request {
     impl DnsRequest {
         pub fn new(message: Message, src_addr: SocketAddr, protocol: Protocol) -> Self {
             let id = message.id();
-            let query = message.query().cloned().unwrap_or_default();
+            let query = message.queries().first().cloned().unwrap_or_default();
             Self {
                 id,
                 query: query.into(),
@@ -291,8 +298,41 @@ mod request {
             let rtype = self.query().query_type();
             self.extensions()
                 .as_ref()
-                .map(|e| e.dnssec_ok())
+                .map(|e| e.flags().dnssec_ok)
                 .unwrap_or(rtype.is_dnssec())
+        }
+    }
+
+    impl Debug for DnsRequest {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let id = self.id();
+            let src_addr = self.src();
+            let protocol = self.protocol();
+            let query = self.query();
+            let query_name = query.name();
+            let query_type = query.query_type();
+            let query_class = query.query_class();
+
+            let message_type = self.message_type();
+            let is_dnssec = self.is_dnssec();
+            let qop_code = self.op_code();
+            let qflags = self.flags();
+
+            write!(
+                f,
+                "{id} src:{proto}://{addr}#{port} type:{message_type} dnssec:{is_dnssec} {op}:{query}:{qtype}:{class} qflags:{qflags}",
+                id = id,
+                proto = protocol,
+                addr = src_addr.ip(),
+                port = src_addr.port(),
+                message_type = message_type,
+                is_dnssec = is_dnssec,
+                op = qop_code,
+                query = query_name,
+                qtype = query_type,
+                class = query_class,
+                qflags = qflags,
+            )
         }
     }
 
@@ -308,11 +348,11 @@ mod request {
         fn from(query: Query) -> Self {
             use std::net::{Ipv4Addr, SocketAddrV4};
 
-            let mut message = Message::new();
+            let mut message = Message::query();
             message.add_query(query.clone());
 
             Self {
-                id: rand::random(),
+                id: message.id(),
                 query: query.into(),
                 message: Arc::new(message),
                 src: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53)),
@@ -326,9 +366,11 @@ mod request {
 
         fn try_from(value: SerialMessage) -> Result<Self, Self::Error> {
             match value {
-                SerialMessage::Raw(message, src_addr, protocol) => {
-                    Ok(DnsRequest::new(message, src_addr, protocol))
-                }
+                SerialMessage::Raw(message, src_addr, protocol) => Ok(DnsRequest::new(
+                    message.as_ref().clone(),
+                    src_addr,
+                    protocol,
+                )),
                 SerialMessage::Bytes(bytes, src_addr, protocol) => {
                     use crate::libdns::proto::serialize::binary::{BinDecodable, BinDecoder};
                     let mut decoder = BinDecoder::new(&bytes);
@@ -344,7 +386,7 @@ mod response {
 
     use crate::dns_client::MAX_TTL;
     use crate::libdns::proto::{
-        op::{self, Header, Message, Query},
+        op::{self, Header, Message, MessageType, Query},
         rr::{RData, Record},
     };
     use crate::libdns::resolver::TtlClip as _;
@@ -358,11 +400,17 @@ mod response {
 
     static DEFAULT_QUERY: once_cell::sync::Lazy<Query> = once_cell::sync::Lazy::new(Query::default);
 
-    #[derive(Debug, Clone, Eq, PartialEq)]
+    #[derive(Debug, Clone, Eq)]
     pub struct DnsResponse {
         message: Message,
         valid_until: Instant,
         name_server_group: Option<String>,
+    }
+
+    impl PartialEq for DnsResponse {
+        fn eq(&self, other: &Self) -> bool {
+            self.message == other.message && self.name_server_group == other.name_server_group
+        }
     }
 
     impl DnsResponse {
@@ -380,8 +428,8 @@ mod response {
             R: IntoIterator<Item = Record, IntoIter = I>,
             I: Iterator<Item = Record>,
         {
-            use op::message::{update_header_counts, HeaderCounts};
-            let mut message = Message::new();
+            use op::message::{HeaderCounts, update_header_counts};
+            let mut message = Message::query().to_response();
             message.add_query(query.clone());
             message.add_answers(records);
 
@@ -391,7 +439,7 @@ mod response {
                 HeaderCounts {
                     query_count: message.queries().len(),
                     answer_count: message.answers().len(),
-                    nameserver_count: message.name_servers().len(),
+                    authority_count: message.authorities().len(),
                     additional_count: message.additionals().len(),
                 },
             );
@@ -407,7 +455,7 @@ mod response {
 
         pub fn empty() -> Self {
             Self {
-                message: Default::default(),
+                message: Message::query(),
                 valid_until: Instant::now(),
                 name_server_group: None,
             }
@@ -420,7 +468,7 @@ mod response {
         }
 
         pub fn query(&self) -> &Query {
-            self.deref().query().unwrap_or(&DEFAULT_QUERY)
+            self.deref().queries().first().unwrap_or(&DEFAULT_QUERY)
         }
 
         pub fn message(&self) -> &Message {

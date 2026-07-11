@@ -179,7 +179,7 @@ impl ServiceCommand {
                 })
                 .unwrap_or_else(|| "Failed".to_string());
             error!("{:?}, {}", self.program, msg);
-            Err(io::Error::new(io::ErrorKind::Other, msg))
+            Err(io::Error::other(msg))
         }
     }
 
@@ -253,7 +253,7 @@ mod tests {
         let stdout = String::from_utf8_lossy(output.stdout.as_slice()).to_string();
 
         #[cfg(unix)]
-        assert_eq!(format!("{}", cmd), "uname -a");
+        assert_eq!(format!("{cmd}"), "uname -a");
 
         cfg_if! {
             if #[cfg(target_os="windows")] {

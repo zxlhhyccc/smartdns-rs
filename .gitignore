@@ -20,9 +20,18 @@ dist
 
 .idea/
 
-etc/smartdns/smartdns.yaml
+/etc/smartdns/zones
+/etc/smartdns/managed
+/etc/smartdns/*.yaml
+/etc/smartdns/*.json
 
 .vscode/settings.json
 
+/tmp
+
 # localhost.crt
 # localhost.key
+
+*.local.*
+
+.agent

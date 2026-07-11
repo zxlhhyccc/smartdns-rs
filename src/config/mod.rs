@@ -1,44 +1,54 @@
 use std::{
     collections::{HashMap, HashSet},
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::PathBuf,
     str::FromStr,
+    sync::Arc,
 };
 
 use crate::{
-    infra::{file_mode::FileMode, ipset::IpSet},
-    libdns::proto::rr::{Name, RecordType},
+    infra::file_mode::FileMode,
+    libdns::proto::rr::{
+        Name, RecordType,
+        rdata::{HTTPS, SRV},
+    },
     log::Level,
     proxy::ProxyConfig,
     third_ext::serde_str,
 };
 
 use byte_unit::Byte;
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv6Net};
 use serde::{self, Deserialize, Serialize};
 
 mod audit;
+mod bind_addr;
 mod cache;
+mod client_rule;
 mod domain;
 mod domain_rule;
 mod domain_set;
-mod listener;
+mod ip_set;
 mod log;
 mod nameserver;
 pub mod parser;
 mod response_mode;
+mod rule_group;
 mod server_opts;
 mod speed_mode;
 
 pub use audit::*;
+pub use bind_addr::*;
 pub use cache::*;
+pub use client_rule::*;
 pub use domain::*;
 pub use domain_rule::*;
 pub use domain_set::*;
-pub use listener::*;
+pub use ip_set::*;
 pub use log::*;
 pub use nameserver::*;
 pub use response_mode::*;
+pub use rule_group::*;
 pub use server_opts::*;
 pub use speed_mode::*;
 
@@ -48,7 +58,9 @@ pub type DomainSets = HashMap<String, HashSet<WildcardName>>;
 pub type ForwardRules = Vec<ForwardRule>;
 pub type AddressRules = Vec<AddressRule>;
 pub type DomainRules = Vec<ConfigForDomain<DomainRule>>;
-pub type CNameRules = Vec<ConfigForDomain<CName>>;
+pub type CNameRules = Vec<ConfigForDomain<CNameRule>>;
+pub type SrvRecords = Vec<ConfigForDomain<SRV>>;
+pub type HttpsRecords = Vec<ConfigForDomain<HttpsRecordRule>>;
 
 #[derive(Default)]
 pub struct Config {
@@ -87,17 +99,8 @@ pub struct Config {
     /// Local domain suffix appended to DHCP names and hosts file entries.
     pub domain: Option<Name>,
 
-    /// Include another configuration options
-    ///
-    /// conf-file [file]
-    /// ```
-    /// example:
-    ///   conf-file blacklist-ip.conf
-    /// ```
-    pub conf_file: Option<PathBuf>,
-
-    /// listeners
-    pub listeners: Vec<ListenerConfig>,
+    /// List of bind addresses
+    pub binds: Vec<BindAddrConfig>,
 
     /// SSL Certificate file path
     pub bind_cert_file: Option<PathBuf>,
@@ -114,16 +117,16 @@ pub struct Config {
     pub cache: CacheConfig,
 
     /// List of hosts that supply bogus NX domain results
-    pub bogus_nxdomain: IpSet,
+    pub bogus_nxdomain: Vec<IpOrSet>,
 
     /// List of IPs that will be filtered when nameserver is configured -blacklist-ip parameter
-    pub blacklist_ip: IpSet,
+    pub blacklist_ip: Vec<IpOrSet>,
 
     /// List of IPs that will be accepted when nameserver is configured -whitelist-ip parameter
-    pub whitelist_ip: IpSet,
+    pub whitelist_ip: Vec<IpOrSet>,
 
     /// List of IPs that will be ignored
-    pub ignore_ip: IpSet,
+    pub ignore_ip: Vec<IpOrSet>,
 
     /// speed check mode
     ///
@@ -141,6 +144,11 @@ pub struct Config {
     /// force-AAAA-SOA [yes|no]
     pub force_aaaa_soa: Option<bool>,
 
+    /// force HTTPS query return SOA
+    ///
+    /// force-HTTPS-SOA [yes|no]
+    pub force_https_soa: Option<bool>,
+
     /// force specific qtype return soa
     ///
     /// force-qtype-SOA [qtypeid |...]
@@ -157,9 +165,14 @@ pub struct Config {
     /// dualstack-ip-selection [yes|no]
     pub dualstack_ip_selection: Option<bool>,
     /// dualstack-ip-selection-threshold [num] (0~1000)
-    pub dualstack_ip_selection_threshold: Option<u16>,
+    pub dualstack_ip_selection_threshold: Option<u64>,
     /// dualstack-ip-allow-force-AAAA [yes|no]
     pub dualstack_ip_allow_force_aaaa: Option<bool>,
+
+    /// DNS64 prefix
+    ///
+    /// dns64 ip-prefix/mask
+    pub dns64_prefix: Option<Ipv6Net>,
 
     /// edns client subnet
     ///
@@ -206,41 +219,32 @@ pub struct Config {
     /// remote dns server list
     pub nameservers: Vec<NameServerInfo>,
 
-    /// specific nameserver to domain
-    ///
-    /// nameserver /domain/[group|-]
-    ///
-    /// ```
-    /// example:
-    ///   nameserver /www.example.com/office, Set the domain name to use the appropriate server group.
-    ///   nameserver /www.example.com/-, ignore this domain
-    /// ```
-    pub forward_rules: Vec<ForwardRule>,
-
-    /// specific address to domain
-    ///
-    /// address /domain/[ip|-|-4|-6|#|#4|#6]
-    ///
-    /// ```
-    /// example:
-    ///   address /www.example.com/1.2.3.4, return ip 1.2.3.4 to client
-    ///   address /www.example.com/-, ignore address, query from upstream, suffix 4, for ipv4, 6 for ipv6, none for all
-    ///   address /www.example.com/#, return SOA to client, suffix 4, for ipv4, 6 for ipv6, none for all
-    /// ```
-    pub address_rules: AddressRules,
-
-    /// set domain rules
-    pub domain_rules: DomainRules,
-
-    pub cnames: CNameRules,
-
     /// The proxy server for upstream querying.
     pub proxy_servers: HashMap<String, ProxyConfig>,
 
-    pub nftsets: Vec<ConfigForDomain<Vec<ConfigForIP<NftsetConfig>>>>,
+    pub nftsets: Vec<ConfigForDomain<Vec<ConfigForIP<NFTsetConfig>>>>,
 
     pub resolv_file: Option<PathBuf>,
     pub domain_set_providers: HashMap<String, Vec<DomainSetProvider>>,
+
+    /// ip set
+    pub ip_sets: HashMap<String, Vec<IpNet>>,
+
+    pub ip_alias: Vec<IpAlias>,
+
+    pub client_rules: Vec<ClientRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpAlias {
+    pub ip: IpOrSet,
+    pub to: Arc<[IpAddr]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IpOrSet {
+    Net(IpNet),
+    Set(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,7 +275,7 @@ pub enum ConfigForIP<T: Sized + parser::NomParser> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct NftsetConfig {
+pub struct NFTsetConfig {
     pub family: &'static str,
     pub table: String,
     pub name: String,
@@ -292,21 +296,23 @@ pub struct SslConfig {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
-pub enum DomainAddress {
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub enum AddressRuleValue {
     SOA,
     SOAv4,
     SOAv6,
     IGN,
     IGNv4,
     IGNv6,
-    IPv4(Ipv4Addr),
-    IPv6(Ipv6Addr),
+    Addr {
+        v4: Option<Arc<[Ipv4Addr]>>,
+        v6: Option<Arc<[Ipv6Addr]>>,
+    },
 }
 
-impl std::fmt::Display for DomainAddress {
+impl std::fmt::Display for AddressRuleValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use DomainAddress::*;
+        use AddressRuleValue::*;
         match self {
             SOA => write!(f, "#"),
             SOAv4 => write!(f, "#4"),
@@ -314,8 +320,30 @@ impl std::fmt::Display for DomainAddress {
             IGN => write!(f, "-"),
             IGNv4 => write!(f, "-4"),
             IGNv6 => write!(f, "-6"),
-            IPv4(ip) => write!(f, "{ip}"),
-            IPv6(ip) => write!(f, "{ip}"),
+            Addr { v4, v6 } => {
+                let mut first = true;
+                if let Some(v4) = v4 {
+                    for ip in v4.iter() {
+                        if first {
+                            first = false;
+                        } else {
+                            write!(f, ",")?;
+                        }
+                        write!(f, "{ip}")?;
+                    }
+                }
+                if let Some(v6) = v6 {
+                    for ip in v6.iter() {
+                        if first {
+                            first = false;
+                        } else {
+                            write!(f, ",")?;
+                        }
+                        write!(f, "{ip}")?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -324,18 +352,26 @@ impl std::fmt::Display for DomainAddress {
 #[allow(clippy::upper_case_acronyms)]
 pub enum Ignorable<T> {
     #[default]
-    IGN,
+    Ignore,
     Value(T),
 }
 
-pub type CName = Ignorable<Name>;
+pub type CNameRule = Ignorable<Name>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, crate::api::ToSchema)]
 pub struct AddressRule {
     #[serde(with = "serde_str")]
+    #[schema(value_type = String)]
     pub domain: Domain,
     #[serde(with = "serde_str")]
-    pub address: DomainAddress,
+    #[schema(value_type = String)]
+    pub address: AddressRuleValue,
+}
+
+impl std::fmt::Display for AddressRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "/{}/{}", self.domain, self.address)
+    }
 }
 
 /// alias: nameserver rules
@@ -344,6 +380,24 @@ pub struct ForwardRule {
     #[serde(with = "serde_str")]
     pub domain: Domain,
     pub nameserver: String,
+}
+
+impl std::fmt::Display for ForwardRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "/{}/{}", self.domain, self.nameserver)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum HttpsRecordRule {
+    SOA,
+    Ignore,
+    Filter {
+        no_ipv4_hint: bool,
+        no_ipv6_hint: bool,
+    },
+    RecordData(HTTPS),
 }
 
 macro_rules! impl_from_str {
@@ -363,4 +417,4 @@ macro_rules! impl_from_str {
     };
 }
 
-impl_from_str!(AddressRule, Domain, DomainAddress, ListenerAddress);
+impl_from_str!(AddressRule, Domain, AddressRuleValue, BindAddr);

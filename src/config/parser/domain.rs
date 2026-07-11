@@ -3,7 +3,7 @@ use super::*;
 impl NomParser for Name {
     fn parse(input: &str) -> IResult<&str, Self> {
         let name = is_not(" \n\t\\/|\"#',!+<>");
-        map_res(name, <Name as std::str::FromStr>::from_str)(input)
+        map_res(name, |s: &str| s.parse()).parse(input)
     }
 }
 
@@ -11,20 +11,29 @@ impl NomParser for WildcardName {
     fn parse(input: &str) -> IResult<&str, Self> {
         alt((
             map(
-                preceded(tuple((char('*'), char('.'))), NomParser::parse),
-                WildcardName::Sub,
+                (
+                    map_res(
+                        terminated(
+                            verify(is_not("."), |w: &str| !w.is_empty() && w.contains('*')),
+                            char('.'),
+                        ),
+                        Wildcard::from_str,
+                    ),
+                    NomParser::parse,
+                ),
+                |(w, n)| WildcardName::Sub(w, n),
             ),
             map(
-                preceded(tuple((char('-'), char('.'))), NomParser::parse),
+                preceded((char('-'), char('.')), NomParser::parse),
                 WildcardName::Full,
             ),
             map(
-                preceded(tuple((opt(char('+')), char('.'))), NomParser::parse),
+                preceded((opt(char('+')), char('.')), NomParser::parse),
                 WildcardName::Suffix,
             ),
             map(NomParser::parse, |name: Name| {
                 if name.is_wildcard() {
-                    WildcardName::Sub(name.base_name())
+                    WildcardName::Sub(Default::default(), name.base_name())
                 } else if name.is_root() {
                     WildcardName::Suffix(name)
                 } else {
@@ -34,7 +43,8 @@ impl NomParser for WildcardName {
             map(pair(char('+'), opt(char('.'))), |_| {
                 WildcardName::Suffix(Name::root())
             }),
-        ))(input)
+        ))
+        .parse(input)
     }
 }
 
@@ -60,7 +70,8 @@ impl NomParser for Domain {
                 Domain::Set,
             ),
             map(NomParser::parse, Domain::Name),
-        ))(input)
+        ))
+        .parse(input)
     }
 }
 
@@ -109,6 +120,6 @@ mod test {
         assert_eq!(n, WildcardName::Suffix(Name::root()));
 
         let n = WildcardName::from_str("*").unwrap();
-        assert_eq!(n, WildcardName::Sub(Name::root()));
+        assert_eq!(n, WildcardName::Sub(Default::default(), Name::root()));
     }
 }

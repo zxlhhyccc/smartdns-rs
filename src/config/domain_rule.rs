@@ -8,9 +8,13 @@ pub struct DomainRule {
     /// The name of NameServer Group.
     pub nameserver: Option<String>,
 
-    pub address: Option<DomainAddress>,
+    pub address: Option<AddressRuleValue>,
 
-    pub cname: Option<CName>,
+    pub cname: Option<CNameRule>,
+
+    pub srv: Option<SRV>,
+
+    pub https: Option<HttpsRecordRule>,
 
     /// The mode of speed checking.
     pub speed_check_mode: Option<SpeedCheckModeList>,
@@ -21,7 +25,7 @@ pub struct DomainRule {
 
     pub no_cache: Option<bool>,
     pub no_serve_expired: Option<bool>,
-    pub nftset: Option<Vec<ConfigForIP<NftsetConfig>>>,
+    pub nftset: Option<Vec<ConfigForIP<NFTsetConfig>>>,
 
     pub rr_ttl: Option<u64>,
     pub rr_ttl_min: Option<u64>,

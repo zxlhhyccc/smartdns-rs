@@ -6,6 +6,10 @@ pub struct ServerOpts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
 
+    /// set domain request to use the appropriate rule group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_group: Option<String>,
+
     /// skip address rule.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_rule_addr: Option<bool>,
@@ -38,11 +42,16 @@ pub struct ServerOpts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_aaaa_soa: Option<bool>,
 
+    /// force HTTPS query return SOA.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force_https_soa: Option<bool>,
+
     /// do not serve expired
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_serve_expired: Option<bool>,
 
     /// Indicates whether the query task is a background task.
+    #[serde(default)]
     pub is_background: bool,
 }
 
@@ -101,6 +110,12 @@ impl ServerOpts {
         self.force_aaaa_soa.unwrap_or_default()
     }
 
+    /// force HTTPS query return SOA.
+    #[inline]
+    pub fn force_https_soa(&self) -> bool {
+        self.force_https_soa.unwrap_or_default()
+    }
+
     /// do not serve expired.
     #[inline]
     pub fn no_serve_expired(&self) -> bool {
@@ -118,8 +133,10 @@ impl ServerOpts {
             no_rule_soa,
             no_dualstack_selection,
             force_aaaa_soa,
+            force_https_soa,
             no_serve_expired,
             is_background: _,
+            rule_group,
         } = other;
 
         if self.group.is_none() {
@@ -153,8 +170,15 @@ impl ServerOpts {
             self.force_aaaa_soa = force_aaaa_soa;
         }
 
+        if self.force_https_soa.is_none() {
+            self.force_https_soa = force_https_soa;
+        }
+
         if self.no_serve_expired.is_none() {
             self.no_serve_expired = no_serve_expired;
+        }
+        if self.rule_group.is_none() {
+            self.rule_group = rule_group;
         }
     }
 }

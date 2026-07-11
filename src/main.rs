@@ -2,7 +2,9 @@
 // #![feature(test)]
 
 use cli::*;
-use std::path::PathBuf;
+use config::NameServerInfo;
+use dns_url::DnsUrl;
+use std::str::FromStr;
 
 mod api;
 mod app;
@@ -19,6 +21,7 @@ mod dns_mw_audit;
 mod dns_mw_bogus;
 mod dns_mw_cache;
 mod dns_mw_cname;
+mod dns_mw_dns64;
 mod dns_mw_dnsmasq;
 mod dns_mw_dualstack;
 mod dns_mw_hosts;
@@ -36,13 +39,16 @@ mod libdns;
 mod log;
 mod preset_ns;
 mod proxy;
+#[cfg(feature = "resolve-cli")]
+mod resolver;
 mod rustls;
 mod server;
 #[cfg(feature = "service")]
 mod service;
 mod third_ext;
 #[cfg(feature = "self-update")]
-mod update;
+mod updater;
+mod zone;
 
 use error::Error;
 use infra::middleware;
@@ -68,13 +74,10 @@ fn banner() {
 /// The app name
 const NAME: &str = "SmartDNS";
 
+include!(concat!(env!("OUT_DIR"), "/build_time_vars.rs"));
+
 /// The default configuration.
 const DEFAULT_CONF: &str = include_str!("../etc/smartdns/smartdns.conf");
-
-/// Returns a version as specified in Cargo.toml
-pub fn version() -> &'static str {
-    concat!(env!("CARGO_PKG_VERSION"), " ", env!("CARGO_BUILD_DATE"))
-}
 
 #[cfg(not(windows))]
 fn main() {
@@ -83,7 +86,7 @@ fn main() {
 
 #[cfg(windows)]
 fn main() -> windows_service::Result<()> {
-    if matches!(std::env::args().last(), Some(flag) if flag == "--ws7642ea814a90496daaa54f2820254f12")
+    if matches!(std::env::args().next_back(), Some(flag) if flag == "--ws7642ea814a90496daaa54f2820254f12")
     {
         return service::windows::run();
     }
@@ -95,10 +98,15 @@ fn main() -> windows_service::Result<()> {
 impl Cli {
     #[inline]
     pub fn run(self) {
-        let _guard = self.log_level().map(log::default);
+        let _guard = self.log_level().map(log::console);
 
         match self.command {
-            Commands::Run { conf, pid, .. } => {
+            Commands::Run {
+                directory,
+                conf,
+                pid,
+                ..
+            } => {
                 let _guard = pid
                     .map(|pid| {
                         use infra::process_guard;
@@ -114,8 +122,18 @@ impl Cli {
                         }
                     })
                     .unwrap_or_default();
+                hello_starting();
+                let cfg = RuntimeConfig::load(directory, conf);
 
-                run_server(conf);
+                cfg.summary();
+
+                #[cfg(target_os = "linux")]
+                match cfg.user() {
+                    Some(user) => run_user::with(user, None).expect("switch user failed"),
+                    None => run_user::try_drop_privs(),
+                }
+                app::serve(cfg);
+                good_bye();
             }
             #[cfg(feature = "service")]
             Commands::Service {
@@ -138,7 +156,7 @@ impl Cli {
                             };
                             if let Some(out) = out {
                                 if let Ok(out) = String::from_utf8(out.stdout) {
-                                    print!("{}", out);
+                                    print!("{out}");
                                 } else {
                                     warn!("get service status failed.");
                                 }
@@ -165,27 +183,53 @@ impl Cli {
             Commands::Service { command: _ } => {
                 warn!("please enable `service` feature")
             }
-            Commands::Test { conf } => {
-                RuntimeConfig::load(conf);
+            Commands::Test { direcory, conf } => {
+                RuntimeConfig::load(direcory, conf);
             }
             #[cfg(feature = "self-update")]
-            Commands::Update { yes } => {
-                use update::update;
-                update(yes).unwrap();
+            Commands::Update { yes, version } => {
+                updater::update(yes, version.as_deref()).unwrap();
+            }
+            #[cfg(feature = "resolve-cli")]
+            Commands::Resolve(command) => {
+                drop(_guard);
+                command.execute();
+            }
+            #[cfg(all(feature = "resolve-cli", any(unix, windows)))]
+            Commands::Symlink { link } => {
+                let original = std::env::current_exe().expect("failed to get current exe path");
+                if link.exists() {
+                    println!("link already exists");
+                    return;
+                }
+
+                #[cfg(unix)]
+                let res = std::os::unix::fs::symlink(original, link);
+
+                #[cfg(windows)]
+                let res = std::os::windows::fs::symlink_file(original, link);
+
+                match res {
+                    Ok(()) => println!("symlink created"),
+                    Err(err) => println!("failed to create symlink, {err}"),
+                }
+            }
+            #[allow(unreachable_patterns)]
+            _ => {
+                unimplemented!()
             }
         }
     }
 }
 
-fn run_server(conf: Option<PathBuf>) {
-    hello_starting();
-    app::bootstrap(conf);
-    info!("{} {} shutdown", crate::NAME, crate::version());
+#[inline]
+fn hello_starting() {
+    info!("{} 🐋 {} starting", NAME, BUILD_VERSION);
 }
 
 #[inline]
-fn hello_starting() {
-    info!("Smart-DNS 🐋 {} starting", version());
+fn good_bye() {
+    info!("{} {} shutdown", crate::NAME, crate::BUILD_VERSION);
 }
 
 impl RuntimeConfig {
@@ -196,6 +240,23 @@ impl RuntimeConfig {
         let proxies = self.proxies().clone();
 
         let mut builder = DnsClient::builder();
+
+        #[cfg(feature = "mdns")]
+        if self.mdns_lookup() {
+            use crate::libdns::proto::multicast::{MDNS_IPV4, MDNS_IPV6};
+            let mdns_servers = [*MDNS_IPV4, *MDNS_IPV6]
+                .into_iter()
+                .map(|ip| format!("mdns://{ip}"))
+                .flat_map(|s| DnsUrl::from_str(&s).ok())
+                .map(|url| {
+                    let mut config = NameServerInfo::from(url);
+                    config.group = vec!["mdns".to_string()];
+                    config.exclude_default_group = true;
+                    config
+                })
+                .collect::<Vec<_>>();
+            builder = builder.add_servers(mdns_servers.to_vec());
+        }
         builder = builder.add_servers(servers.to_vec());
         if let Some(path) = ca_path {
             builder = builder.with_ca_path(path.to_owned());
@@ -221,7 +282,7 @@ mod signal {
 
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             match signal(SignalKind::terminate()) {
                 Ok(mut terminate) => tokio::select! {
                     _ = terminate.recv() => SignalKind::terminate(),
@@ -252,42 +313,109 @@ mod signal {
 mod run_user {
     use std::{collections::HashSet, io};
 
-    use caps::{CapSet, Capability};
+    use crate::log;
+    use caps::{
+        CapSet::{Effective, Permitted},
+        Capability::{self, CAP_NET_ADMIN, CAP_NET_BIND_SERVICE, CAP_NET_BROADCAST, CAP_NET_RAW},
+        securebits::set_keepcaps,
+    };
+    use users::{
+        get_current_gid, get_current_uid, get_effective_gid, get_effective_uid, get_group_by_name,
+        get_user_by_name,
+        switch::{set_current_gid, set_current_uid},
+    };
+    use uzers as users;
 
-    pub fn with(
-        username: &str,
-        groupname: Option<&str>,
-    ) -> io::Result<users::switch::SwitchUserGuard> {
+    pub static DEFAULT_USER: &str = "nobody";
+    pub static DEFAULT_GROUP: &str = "nobody";
+
+    pub fn with(username: &str, groupname: Option<&str>) -> io::Result<()> {
         let mut caps = HashSet::new();
-        caps.insert(Capability::CAP_NET_ADMIN);
-        caps.insert(Capability::CAP_NET_BIND_SERVICE);
-        caps.insert(Capability::CAP_NET_RAW);
-        switch_user(username, groupname, Some(&caps))
+        caps.insert(CAP_NET_ADMIN); // nftset
+        caps.insert(CAP_NET_BIND_SERVICE); // bind
+        caps.insert(CAP_NET_BROADCAST); // mdns
+        caps.insert(CAP_NET_RAW); // ping
+        switch_user(username, groupname, &caps)
+    }
+
+    pub fn try_drop_privs() {
+        if let Err(err) = with(DEFAULT_USER, Some(DEFAULT_GROUP)) {
+            log::error!("failed to drop privs: {}", err);
+        }
     }
 
     #[inline]
     fn switch_user(
         username: &str,
         groupname: Option<&str>,
-        caps: Option<&HashSet<Capability>>,
-    ) -> io::Result<users::switch::SwitchUserGuard> {
-        use users::{get_group_by_name, get_user_by_name, switch::switch_user_group};
+        caps: &HashSet<Capability>,
+    ) -> io::Result<()> {
+        let (uid, gid, euid, egid) = (
+            get_current_uid(),
+            get_current_gid(),
+            get_effective_uid(),
+            get_effective_gid(),
+        );
+
+        if uid == 0 || euid == 0 {
+            log::info!(
+                "running as root: {uid}, gid: {gid} (euid: {euid}, egid: {egid})...dropping privileges."
+            );
+        } else {
+            return Ok(()); // already running as non-root, nothing to do.
+        }
 
         let user = get_user_by_name(username);
+        let Some(user) = user else {
+            return Err(io::Error::other(format!("User {username} not found")));
+        };
 
         let group = groupname.map(get_group_by_name).unwrap_or_default();
 
-        match (user, group) {
-            (Some(user), None) => switch_user_group(user.uid(), user.primary_group_id()),
-            (Some(user), Some(group)) => switch_user_group(user.uid(), group.gid()),
-            _ => Err(io::ErrorKind::Other.into()),
-        }
-        .map(|guard| {
-            if let Some(caps) = caps {
-                caps::set(None, CapSet::Effective, caps).unwrap();
-                caps::set(None, CapSet::Permitted, caps).unwrap();
-            }
-            guard
-        })
+        let uid = user.uid();
+        let gid = group
+            .map(|g| g.gid())
+            .unwrap_or_else(|| user.primary_group_id());
+
+        keepcaps()?;
+        set_gid(gid)?;
+        set_uid(uid)?;
+
+        let (uid, gid, euid, egid) = (
+            get_current_uid(),
+            get_current_gid(),
+            get_effective_uid(),
+            get_effective_gid(),
+        );
+
+        set_caps(caps)?;
+
+        log::info!("now running as uid: {uid}, gid: {gid} (euid: {euid}, egid: {egid})");
+
+        Ok(())
+    }
+
+    #[inline]
+    fn set_gid(gid: u32) -> io::Result<()> {
+        set_current_gid(gid)
+            .map_err(|err| io::Error::other(format!("Failed to set gid: {gid}, {err}")))
+    }
+
+    #[inline]
+    fn set_uid(uid: u32) -> io::Result<()> {
+        set_current_uid(uid)
+            .map_err(|err| io::Error::other(format!("Failed to set uid: {uid}, {err}")))
+    }
+
+    #[inline]
+    fn set_caps(caps: &caps::CapsHashSet) -> io::Result<()> {
+        caps::set(None, Effective, caps)
+            .and(caps::set(None, Permitted, caps))
+            .map_err(|err| io::Error::other(format!("Failed to set capabilities: {err}")))
+    }
+
+    #[inline]
+    fn keepcaps() -> io::Result<()> {
+        set_keepcaps(true).map_err(|err| io::Error::other(format!("Failed to set keepcaps: {err}")))
     }
 }

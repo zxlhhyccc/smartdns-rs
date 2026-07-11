@@ -148,10 +148,10 @@ impl PartialEq<Ipv6Addr> for PingAddr {
 impl Display for PingAddr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PingAddr::Icmp(addr) => write!(f, "icmp://{}", addr),
-            PingAddr::Tcp(addr) => write!(f, "tcp://{}", addr),
-            PingAddr::Http(addr) => write!(f, "http://{}", addr),
-            PingAddr::Https(addr) => write!(f, "https://{}", addr),
+            PingAddr::Icmp(addr) => write!(f, "icmp://{addr}"),
+            PingAddr::Tcp(addr) => write!(f, "tcp://{addr}"),
+            PingAddr::Http(addr) => write!(f, "http://{addr}"),
+            PingAddr::Https(addr) => write!(f, "https://{addr}"),
         }
     }
 }
@@ -290,9 +290,9 @@ mod icmp {
     use std::{net::IpAddr, time::Duration};
 
     use rand::random;
-    use surge_ping::{Client, Config, IcmpPacket, PingIdentifier, PingSequence, Pinger, ICMP};
+    use surge_ping::{Client, Config, ICMP, IcmpPacket, PingIdentifier, PingSequence, Pinger};
 
-    use super::{do_agg, PingAddr, PingError, PingOptions, PingOutput};
+    use super::{PingAddr, PingError, PingOptions, PingOutput, do_agg};
 
     mod auto_sock_type {
         use cfg_if::cfg_if;
@@ -417,6 +417,28 @@ mod icmp {
         }
     }
 
+    use once_cell::sync::Lazy;
+
+    static IPV4_CLIENT: Lazy<Result<Client, PingError>> = Lazy::new(|| {
+        Client::new(
+            &Config::builder()
+                .kind(ICMP::V4)
+                .sock_type_hint(auto_sock_type::detect(ICMP::V4))
+                .build(),
+        )
+        .map_err(PingError::from)
+    });
+
+    static IPV6_CLIENT: Lazy<Result<Client, PingError>> = Lazy::new(|| {
+        Client::new(
+            &Config::builder()
+                .kind(ICMP::V6)
+                .sock_type_hint(auto_sock_type::detect(ICMP::V6))
+                .build(),
+        )
+        .map_err(PingError::from)
+    });
+
     pub async fn ping(ipaddr: IpAddr, opts: PingOptions) -> Result<PingOutput, PingError> {
         let PingOptions {
             times,
@@ -428,19 +450,9 @@ mod icmp {
         let mut durations = Vec::new();
 
         let client = match ipaddr {
-            IpAddr::V4(_) => Client::new(
-                &Config::builder()
-                    .kind(ICMP::V4)
-                    .sock_type_hint(auto_sock_type::detect(ICMP::V4))
-                    .build(),
-            ),
-            IpAddr::V6(_) => Client::new(
-                &Config::builder()
-                    .kind(ICMP::V6)
-                    .sock_type_hint(auto_sock_type::detect(ICMP::V6))
-                    .build(),
-            ),
-        }?;
+            IpAddr::V4(_) => IPV4_CLIENT.as_ref().map_err(|e| e.clone())?,
+            IpAddr::V6(_) => IPV6_CLIENT.as_ref().map_err(|e| e.clone())?,
+        };
 
         let mut pinger = client.pinger(ipaddr, PingIdentifier(random())).await;
         pinger.timeout(timeout);
@@ -508,7 +520,7 @@ mod tcp {
 
     use crate::third_ext::FutureTimeoutExt;
 
-    use super::{do_agg, PingAddr, PingError, PingOptions, PingOutput};
+    use super::{PingAddr, PingError, PingOptions, PingOutput, do_agg};
 
     #[inline]
     pub async fn ping(sock_addr: SocketAddr, opts: PingOptions) -> Result<PingOutput, PingError> {
@@ -590,7 +602,7 @@ mod tcp {
 }
 
 mod http {
-    use super::{do_agg, PingAddr, PingError, PingOptions, PingOutput};
+    use super::{PingAddr, PingError, PingOptions, PingOutput, do_agg};
     use crate::third_ext::FutureTimeoutExt;
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
@@ -675,7 +687,7 @@ mod https {
 
     use crate::third_ext::FutureTimeoutExt;
 
-    use super::{do_agg, PingAddr, PingError, PingOptions, PingOutput};
+    use super::{PingAddr, PingError, PingOptions, PingOutput, do_agg};
 
     #[inline]
     pub async fn ping(sock_addr: SocketAddr, opts: PingOptions) -> Result<PingOutput, PingError> {
@@ -863,7 +875,7 @@ mod tests {
             assert!(matches!(results.last().unwrap(), Err(PingError::Timeout)));
 
             for item in results {
-                println!("Ping {:?}", item);
+                println!("Ping {item:?}");
             }
         })
     }

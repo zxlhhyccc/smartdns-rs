@@ -1,18 +1,19 @@
-use std::ffi::OsString;
-use std::str::FromStr;
-
 use clap::Parser;
 use clap::Subcommand;
 use clap_verbosity_flag::{InfoLevel, Verbosity};
+use std::ffi::OsString;
+use std::str::FromStr;
 
 use crate::log::{self, warn};
+#[cfg(feature = "resolve-cli")]
+use crate::resolver::ResolveCommand;
 
 type LogLevelDefault = InfoLevel;
 
-/// Smart-DNS.
+/// SmartDNS.
 ///
 #[derive(Parser, Debug)]
-#[command(author, version=crate::version(), about, long_about = None)]
+#[command(author, version=build_version(), about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -23,16 +24,26 @@ pub struct Cli {
 
 impl Cli {
     pub fn parse() -> Self {
+        #[cfg(feature = "resolve-cli")]
+        if ResolveCommand::is_resolve_cli() {
+            return ResolveCommand::parse().into();
+        }
+
         match Self::try_parse() {
             Ok(cli) => cli,
-            Err(e) => match CompatibleCli::try_parse() {
-                Ok(cli) => cli.into(),
-                Err(_) => {
-                    // Since this is more of a development-time error, we aren't doing as fancy of a quit
-                    // as `get_matches`
-                    e.exit()
+            Err(e) => {
+                #[cfg(feature = "resolve-cli")]
+                if let Ok(resolve_command) = ResolveCommand::try_parse() {
+                    return resolve_command.into();
                 }
-            },
+
+                if let Ok(cli) = CompatibleCli::try_parse() {
+                    return cli.into();
+                }
+                // Since this is more of a development-time error, we aren't doing as fancy of a quit
+                // as `get_matches`
+                e.exit()
+            }
         }
     }
 
@@ -45,10 +56,18 @@ impl Cli {
         let itr = itr.into_iter().collect::<Vec<_>>();
         match Self::try_parse_from(itr.clone()) {
             Ok(cli) => cli,
-            Err(e) => match CompatibleCli::try_parse_from(itr) {
-                Ok(cli) => cli.into(),
-                Err(_) => e.exit(),
-            },
+            Err(e) => {
+                #[cfg(feature = "resolve-cli")]
+                if let Ok(resolve_command) = ResolveCommand::try_parse_from(itr.clone()) {
+                    return resolve_command.into();
+                }
+
+                if let Ok(cli) = CompatibleCli::try_parse_from(itr) {
+                    return cli.into();
+                }
+
+                e.exit()
+            }
         }
     }
 
@@ -62,11 +81,15 @@ impl Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Run the Smart-DNS server.
+    /// Run the SmartDNS server.
     Run {
-        /// Config file
+        /// Configuration file
         #[arg(short = 'c', long)]
         conf: Option<std::path::PathBuf>,
+
+        /// Configuration directory, default to `/etc/smartdns``
+        #[arg(short = 'd', long)]
+        directory: Option<std::path::PathBuf>,
 
         /// Pid file
         #[arg(short = 'p', long)]
@@ -79,12 +102,26 @@ pub enum Commands {
         /// Automatic yes to prompts
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// The target version to update to
+        version: Option<String>,
     },
 
-    /// Manage the Smart-DNS service (install, uninstall, start, stop, restart).
+    /// Manage the SmartDNS service (install, uninstall, start, stop, restart).
     Service {
         #[command(subcommand)]
         command: ServiceCommands,
+    },
+
+    /// Perform DNS resolution.
+    #[cfg(feature = "resolve-cli")]
+    Resolve(ResolveCommand),
+
+    /// Create a symbolic link to the SmartDNS binary (drop-in replacement for `dig`, `nslookup`, `resolve` etc.)
+    #[cfg(feature = "resolve-cli")]
+    Symlink {
+        /// The path to the symlink to create.
+        link: std::path::PathBuf,
     },
 
     /// Test configuration and exit
@@ -92,31 +129,35 @@ pub enum Commands {
         /// Config file
         #[arg(short = 'c', long)]
         conf: Option<std::path::PathBuf>,
+
+        /// Configuration directory, default to `/etc/smartdns``
+        #[arg(short = 'd', long)]
+        direcory: Option<std::path::PathBuf>,
     },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum ServiceCommands {
-    /// Install the Smart-DNS as service.
+    /// Install the SmartDNS as service.
     Install,
 
-    /// Uninstall the Smart-DNS service.
+    /// Uninstall the SmartDNS service.
     Uninstall {
         /// Purge both the binary and config files.
         #[arg(short = 'p', long)]
         purge: bool,
     },
 
-    /// Start the Smart-DNS service.
+    /// Start the SmartDNS service.
     Start,
 
-    /// Stop the Smart-DNS service.
+    /// Stop the SmartDNS service.
     Stop,
 
-    /// Restart the Smart-DNS service.
+    /// Restart the SmartDNS service.
     Restart,
 
-    /// Print the service status of Smart-DNS
+    /// Print the service status of SmartDNS
     Status,
 }
 
@@ -164,10 +205,35 @@ impl From<CompatibleCli> for Cli {
             Default::default()
         };
         Self {
-            command: Commands::Run { conf, pid },
+            command: Commands::Run {
+                conf,
+                pid,
+                directory: None,
+            },
             verbose: verbose0,
         }
     }
+}
+
+#[cfg(feature = "resolve-cli")]
+impl From<ResolveCommand> for Cli {
+    fn from(value: ResolveCommand) -> Self {
+        Self {
+            command: Commands::Resolve(value),
+            verbose: Default::default(),
+        }
+    }
+}
+
+fn build_version() -> &'static str {
+    static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{} 🕙 {}",
+            env!("CARGO_PKG_VERSION"),
+            crate::BUILD_DATE.with_timezone(&chrono::Local)
+        )
+    });
+    &VERSION
 }
 
 #[cfg(test)]
@@ -183,6 +249,7 @@ mod tests {
             Commands::Run {
                 conf: Some(_),
                 pid: None,
+                directory: None
             }
         ));
 
@@ -192,6 +259,7 @@ mod tests {
             Commands::Run {
                 conf: Some(_),
                 pid: None,
+                directory: None
             }
         ));
     }
@@ -219,6 +287,7 @@ mod tests {
             Commands::Run {
                 conf: Some(_),
                 pid: None,
+                directory: None
             }
         ));
 
@@ -255,6 +324,7 @@ mod tests {
             Commands::Run {
                 conf: Some(_),
                 pid: None,
+                directory: None
             }
         ));
 
@@ -264,6 +334,7 @@ mod tests {
             Commands::Run {
                 conf: Some(_),
                 pid: None,
+                directory: None
             }
         ));
     }
@@ -276,6 +347,7 @@ mod tests {
             Commands::Run {
                 conf: Some(_),
                 pid: None,
+                directory: None
             }
         ));
 
@@ -287,6 +359,7 @@ mod tests {
             Commands::Run {
                 conf: Some(_),
                 pid: None,
+                directory: None
             }
         ));
     }
@@ -299,6 +372,7 @@ mod tests {
             Commands::Run {
                 conf: Some(_),
                 pid: None,
+                directory: None
             }
         ));
 
@@ -313,6 +387,7 @@ mod tests {
             Commands::Run {
                 conf: Some(_),
                 pid: None,
+                directory: None
             }
         ));
 

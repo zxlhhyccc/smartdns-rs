@@ -17,6 +17,10 @@ pub fn create_service_definition() -> ServiceDefinition {
         .add_item((CONF_DIR, RemoveIfEmpty))
         .add_item((CONF_PATH, crate::DEFAULT_CONF, 0o644, Preserve, Keep))
         .add_item((SERVICE_FILE_PATH, SERVICE_FILE, 0o644))
+        .add_item((
+            std::path::PathBuf::from(CONF_DIR).join("managed"),
+            RemoveIfEmpty,
+        ))
         .build();
 
     let service_name: &str = &[SERVICE_NAME, ".service"].concat();
@@ -55,7 +59,7 @@ pub fn is_systemd() -> bool {
     match which::which(SERVICE_CTL) {
         Ok(_) => Ok(Path::new(SERVICE_RUN_DIR).exists()),
         Err(which::Error::CannotFindBinaryPath) => Ok(false),
-        Err(x) => Err(io::Error::new(io::ErrorKind::Other, x)),
+        Err(x) => Err(io::Error::other(x)),
     }
     .unwrap_or_default()
 }

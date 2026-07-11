@@ -1,11 +1,12 @@
 # SmartDNS-rs
 
 ![Test](https://github.com/mokeyish/smartdns-rs/actions/workflows/test.yml/badge.svg?branch=main)
+[![Crates.io Version](https://img.shields.io/crates/v/smartdns.svg)](https://crates.io/crates/smartdns)
 [![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/mokeyish/smartdns-rs?display_name=tag&include_prereleases)](https://github.com/mokeyish/smartdns-rs/releases)
 [![homebrew version](https://img.shields.io/homebrew/v/smartdns)](https://formulae.brew.sh/formula/smartdns)
 ![OS](https://img.shields.io/badge/os-Windows%20%7C%20MacOS%20%7C%20Linux-blue)
 
-[Docs](https://pymumu.github.io/smartdns/) • [Discord](https://discord.gg/SDhQSA72)
+[Docs](https://pymumu.github.io/smartdns/) •
 
 [English](https://github.com/mokeyish/smartdns-rs/blob/main/README.md) | 中文
 
@@ -67,7 +68,7 @@ SmartDNS-rs 🐋 一个是受 [C 语言版 SmartDNS](https://github.com/pymumu/s
 
 - MacOS
 
-  如果你有安装 [brew ](https://brew.sh/) ，可以直接用下面的命令进行安装。
+  如果你有安装 [brew](https://brew.sh/) ，可以直接用下面的命令进行安装。
 
   ```shell
   brew update
@@ -87,7 +88,7 @@ SmartDNS-rs 🐋 一个是受 [C 语言版 SmartDNS](https://github.com/pymumu/s
   1. 查看帮助
 
      ```shell
-     ./smartdns help
+     ./smartdns --help
      ```
 
   2. 前台运行，方便查看运行状况
@@ -103,9 +104,9 @@ SmartDNS-rs 🐋 一个是受 [C 语言版 SmartDNS](https://github.com/pymumu/s
      查看服务管理命令：
 
      ```shell
-     ./smartdns service help
+     ./smartdns service --help
      ```
-     
+
      *注意：安装成系统服务，需要 administrator / root 权限。*
 
      *服务管理是各系统兼容的，window 下调用 [sc](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-r2-and-2012/cc754599(v=ws.11))；MacOS 下调用 `launchctl` 或者 `brew`；Linux 下调用 `Systemd`  或 `OpenRc`。*
@@ -148,6 +149,41 @@ server-quic 223.5.5.5
 
 
 更多高级的配置请参考 [这里](https://github.com/pymumu/smartdns/blob/doc/docs/configuration.md)
+
+## 使用 `dig` 查询内置诊断信息
+
+SmartDNS-rs 支持通过 `CHAOS TXT` 查询内置诊断字段。
+
+```shell
+# 最常用：一次返回完整身份信息（服务端+客户端，多条 TXT）
+dig @127.0.0.1 CH TXT whoami +short
+
+# 仅服务端身份信息（多条 TXT）
+dig @127.0.0.1 CH TXT smartdns +short
+
+# 服务器名
+dig @127.0.0.1 CH TXT server-name +short
+
+# 服务器版本
+dig @127.0.0.1 CH TXT version +short
+
+# 服务端看到的客户端源 IP
+dig @127.0.0.1 CH TXT client_ip +short
+dig @127.0.0.1 CH TXT client-ip +short
+
+# 客户端 MAC（局域网且服务端 ARP 表可见）
+dig @127.0.0.1 CH TXT client_mac +short
+dig @127.0.0.1 CH TXT client-mac +short
+
+# JSON 输出（后缀风格）
+dig @127.0.0.1 CH TXT whoami.json +short
+dig @127.0.0.1 CH TXT smartdns.json +short
+
+# 兼容性示例
+dig @127.0.0.1 CH TXT hostname.bind +short
+dig @127.0.0.1 CH TXT version.bind +short
+dig @127.0.0.1 CH TXT id.server +short
+```
 
 ## 从源码构建与运行
 

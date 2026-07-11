@@ -4,7 +4,7 @@ use std::{
     process,
 };
 
-use sysinfo::{Pid, PidExt};
+use sysinfo::Pid;
 use thiserror::Error;
 
 pub struct ProcessGuard {
@@ -28,10 +28,10 @@ pub fn create<P: AsRef<Path>>(path: P) -> Result<ProcessGuard, ProcessGuardError
     if path.exists() {
         let id_str = fs::read_to_string(path)?;
         let prev_id = id_str.as_str().parse::<u32>();
-        if let Ok(prev_id) = prev_id {
-            if is_process_running(prev_id) {
-                return Err(ProcessGuardError::AlreadyRunning(prev_id));
-            }
+        if let Ok(prev_id) = prev_id
+            && is_process_running(prev_id)
+        {
+            return Err(ProcessGuardError::AlreadyRunning(prev_id));
         }
     }
 
@@ -44,9 +44,9 @@ pub fn create<P: AsRef<Path>>(path: P) -> Result<ProcessGuard, ProcessGuardError
 }
 
 fn is_process_running(id: u32) -> bool {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System, SystemExt};
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
     let sys = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
     );
     sys.process(Pid::from_u32(id)).is_some()
 }

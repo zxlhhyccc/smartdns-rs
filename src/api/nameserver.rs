@@ -1,21 +1,21 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::IntoResponse, routing::get, Json, Router};
+use axum::{Json, extract::State};
 
-use super::{IntoDataListPayload, ServeState, StatefulRouter};
+use crate::config::NameServerInfo;
+
+use super::openapi::{IntoRouter, http::get, routes};
+use super::{DataListPayload, ServeState, StatefulRouter};
 
 pub fn routes() -> StatefulRouter {
-    Router::new().route("/nameservers", get(nameservers))
+    routes![nameservers].into_router()
 }
 
-async fn nameservers(State(state): State<Arc<ServeState>>) -> impl IntoResponse {
-    Json(
-        state
-            .app
-            .cfg()
-            .await
-            .servers()
-            .to_vec()
-            .into_data_list_payload(),
-    )
+#[get("/nameservers")]
+async fn nameservers(
+    State(state): State<Arc<ServeState>>,
+) -> Json<DataListPayload<NameServerInfo>> {
+    let servers = state.app.cfg().await.servers().to_vec();
+
+    Json(servers.into())
 }

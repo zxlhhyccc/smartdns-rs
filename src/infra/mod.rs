@@ -1,4 +1,7 @@
+pub mod arp;
+pub mod dhcp;
 pub mod file_mode;
+pub mod http_client;
 pub mod ipset;
 pub mod mapped_file;
 pub mod mem_bytes;

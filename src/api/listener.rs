@@ -1,21 +1,16 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::IntoResponse, routing::get, Json, Router};
-
-use super::{IntoDataListPayload, ServeState, StatefulRouter};
+use super::openapi::{IntoRouter, http::get, routes};
+use super::{DataListPayload, ServeState, StatefulRouter};
+use crate::config::BindAddrConfig;
+use axum::{Json, extract::State};
 
 pub fn routes() -> StatefulRouter {
-    Router::new().route("/listeners", get(listeners))
+    routes![listeners].into_router()
 }
 
-async fn listeners(State(state): State<Arc<ServeState>>) -> impl IntoResponse {
-    Json(
-        state
-            .app
-            .cfg()
-            .await
-            .listeners()
-            .to_vec()
-            .into_data_list_payload(),
-    )
+#[get("/listeners")]
+async fn listeners(State(state): State<Arc<ServeState>>) -> Json<DataListPayload<BindAddrConfig>> {
+    let binds = state.app.cfg().await.binds().to_vec();
+    Json(binds.into())
 }

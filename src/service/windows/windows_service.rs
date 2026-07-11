@@ -4,10 +4,10 @@ use std::{ffi::OsString, time::Duration};
 
 use windows_service::service::{ServiceControlAccept, ServiceExitCode, ServiceState, ServiceType};
 use windows_service::{
-    define_windows_service,
+    Result, define_windows_service,
     service::{ServiceControl, ServiceStatus},
     service_control_handler::{self, ServiceControlHandlerResult},
-    service_dispatcher, Result,
+    service_dispatcher,
 };
 
 define_windows_service!(ffi_service_main, service_main);
@@ -35,8 +35,8 @@ fn run_service(_args: Vec<OsString>) -> Result<()> {
             // control manager. Always return NoError even if not implemented.
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
 
-            // Handle stop
-            ServiceControl::Stop => {
+            // Handle stop and shutdown
+            ServiceControl::Stop | ServiceControl::Shutdown => {
                 unsafe {
                     if let Err(err) = windows::Win32::System::Console::GenerateConsoleCtrlEvent(
                         windows::Win32::System::Console::CTRL_C_EVENT,
@@ -62,7 +62,7 @@ fn run_service(_args: Vec<OsString>) -> Result<()> {
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
+        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
         wait_hint: Duration::default(),

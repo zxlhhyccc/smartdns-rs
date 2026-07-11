@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use axum::{extract::State, response::IntoResponse, routing::get, Json, Router};
-
+use super::openapi::{IntoRouter, http::get, routes};
 use super::{ServeState, StatefulRouter};
+use axum::{Json, extract::State, response::IntoResponse};
 
 pub fn routes() -> StatefulRouter {
-    Router::new().route("/logs/config", get(log_config))
+    routes![config].into_router()
 }
 
-async fn log_config(State(state): State<Arc<ServeState>>) -> impl IntoResponse {
+#[get("/logs/config", tag = "Logs")]
+async fn config(State(state): State<Arc<ServeState>>) -> impl IntoResponse {
     Json(state.app.cfg().await.log_config()).into_response()
 }

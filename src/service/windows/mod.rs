@@ -6,15 +6,16 @@ use std::{
 // use regex::Regex;
 
 use super::{
+    SERVICE_NAME,
     installer::{InstallStrategy::*, Installer, UninstallStrategy::*},
     service_manager::{ServiceCommand, ServiceCommands, ServiceDefinition},
-    SERVICE_NAME,
 };
 
 mod shell_escape;
 mod windows_service;
 
-pub const BIN_PATH: &str = "C:\\Windows\\System32\\smartdns.exe";
+const BIN_DIR: &str = "C:\\Program Files\\SmartDNS";
+pub const BIN_PATH: &str = "C:\\Program Files\\SmartDNS\\smartdns.exe";
 pub const CONF_DIR: &str = "C:\\ProgramData\\smartdns";
 pub const CONF_PATH: &str = "C:\\ProgramData\\smartdns\\smartdns.conf";
 
@@ -23,9 +24,14 @@ pub use self::windows_service::run;
 #[inline]
 pub(super) fn create_service_definition() -> ServiceDefinition {
     let installer = Installer::builder()
+        .add_item((BIN_DIR, RemoveIfEmpty))
         .install_current_exe_to(BIN_PATH)
         .add_item((CONF_DIR, RemoveIfEmpty))
         .add_item((CONF_PATH, crate::DEFAULT_CONF, Preserve, Keep))
+        .add_item((
+            std::path::PathBuf::from(CONF_DIR).join("managed"),
+            RemoveIfEmpty,
+        ))
         .build();
 
     let mut bin_path = OsString::new();
@@ -83,10 +89,9 @@ pub(super) fn create_service_definition() -> ServiceDefinition {
                 "/C".into(),
                 format!(
                     r#"
-                    sc query {0} | findstr STATE.*:.*RUNNING > NUL
-                    && (sc query {0} && exit 0) ||  (sc query {0} && exit 1)    
-                    "#,
-                    SERVICE_NAME
+                    sc query {SERVICE_NAME} | findstr STATE.*:.*RUNNING > NUL
+                    && (sc query {SERVICE_NAME} && exit 0) ||  (sc query {SERVICE_NAME} && exit 1)    
+                    "#
                 )
                 .lines()
                 .collect::<String>()

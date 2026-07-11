@@ -1,14 +1,17 @@
 use std::{collections::HashMap, ops::Deref, sync::Arc};
 
-use crate::config::WildcardName;
+use crate::{config::WildcardName, third_ext::HashCode};
+use std::sync::LazyLock;
 
 use crate::{
     collections::DomainMap,
     config::{
         AddressRules, CNameRules, ConfigForDomain, ConfigForIP, Domain, DomainRule, DomainRules,
-        DomainSets, ForwardRules, NftsetConfig,
+        DomainSets, ForwardRules, HttpsRecords, NFTsetConfig, SrvRecords,
     },
 };
+
+static EMPTY: LazyLock<DomainRuleMap> = LazyLock::new(DomainRuleMap::default);
 
 #[derive(Default)]
 pub struct DomainRuleMap {
@@ -16,30 +19,36 @@ pub struct DomainRuleMap {
 }
 
 impl DomainRuleMap {
+    pub fn empty() -> &'static Self {
+        &EMPTY
+    }
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
+        rule_map: &mut HashMap<u64, Arc<DomainRule>>,
         domain_rules: &DomainRules,
         address_rules: &AddressRules,
         forward_rules: &ForwardRules,
         domain_sets: &DomainSets,
         cnames: &CNameRules,
-        nftsets: &Vec<ConfigForDomain<Vec<ConfigForIP<NftsetConfig>>>>,
+        srv_records: &SrvRecords,
+        https_records: &HttpsRecords,
+        nftsets: &Vec<ConfigForDomain<Vec<ConfigForIP<NFTsetConfig>>>>,
     ) -> Self {
+        let expand_domain = |domain: &Domain| match &domain {
+            Domain::Name(name) => {
+                vec![name.clone()]
+            }
+            Domain::Set(s) => domain_sets
+                .get(s)
+                .map(|v| v.iter().map(|n| n.to_owned()).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        };
+
         let mut name_rule_map = HashMap::<WildcardName, DomainRule>::new();
 
         // append domain_rules
-
         for rule in domain_rules {
-            let names = match &rule.domain {
-                Domain::Name(name) => {
-                    vec![name.clone()]
-                }
-                Domain::Set(s) => domain_sets
-                    .get(s)
-                    .map(|v| v.iter().map(|n| n.to_owned()).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-            };
-
-            for name in names {
+            for name in expand_domain(&rule.domain) {
                 // overide
                 *(name_rule_map.entry(name).or_default()) += rule.config.clone();
             }
@@ -47,66 +56,41 @@ impl DomainRuleMap {
 
         // append address rule
         for rule in address_rules.iter() {
-            let names = match &rule.domain {
-                Domain::Name(name) => {
-                    vec![name.clone()]
-                }
-                Domain::Set(s) => domain_sets
-                    .get(s)
-                    .map(|v| v.iter().map(|n| n.to_owned()).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-            };
-
-            for name in names {
-                name_rule_map.entry(name).or_default().address = Some(rule.address);
+            for name in expand_domain(&rule.domain) {
+                (name_rule_map.entry(name).or_default()).address = Some(rule.address.clone());
             }
         }
 
         // append forward rule
         for rule in forward_rules.iter() {
-            let names = match &rule.domain {
-                Domain::Name(name) => {
-                    vec![name.clone()]
-                }
-                Domain::Set(s) => domain_sets
-                    .get(s)
-                    .map(|v| v.iter().map(|n| n.to_owned()).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-            };
-
-            for name in names {
+            for name in expand_domain(&rule.domain) {
                 name_rule_map.entry(name).or_default().nameserver = Some(rule.nameserver.clone())
             }
         }
 
         // set cname
         for rule in cnames {
-            let names = match &rule.domain {
-                Domain::Name(name) => {
-                    vec![name.clone()]
-                }
-                Domain::Set(s) => domain_sets
-                    .get(s)
-                    .map(|v| v.iter().map(|n| n.to_owned()).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-            };
-            for name in names {
+            for name in expand_domain(&rule.domain) {
                 name_rule_map.entry(name).or_default().cname = Some(rule.config.clone())
             }
         }
 
-        for rule in nftsets {
-            let names = match &rule.domain {
-                Domain::Name(name) => {
-                    vec![name.clone()]
-                }
-                Domain::Set(s) => domain_sets
-                    .get(s)
-                    .map(|v| v.iter().map(|n| n.to_owned()).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-            };
+        // set srv
+        for rule in srv_records {
+            for name in expand_domain(&rule.domain) {
+                name_rule_map.entry(name).or_default().srv = Some(rule.config.clone())
+            }
+        }
 
-            for name in names {
+        // set https
+        for rule in https_records {
+            for name in expand_domain(&rule.domain) {
+                name_rule_map.entry(name).or_default().https = Some(rule.config.clone())
+            }
+        }
+
+        for rule in nftsets {
+            for name in expand_domain(&rule.domain) {
                 name_rule_map.entry(name).or_default().nftset = Some(rule.config.clone());
             }
         }
@@ -115,11 +99,10 @@ impl DomainRuleMap {
         rule_items.sort_by(|(a, ..), (b, ..)| a.cmp(b));
 
         let mut rules = DomainMap::default();
-        let mut rule_pool = HashMap::<DomainRule, Arc<DomainRule>>::new();
 
         for (name, v) in rule_items {
-            let rule = rule_pool
-                .entry(v.clone())
+            let rule = rule_map
+                .entry(v.hash_code())
                 .or_insert_with(move || Arc::new(v))
                 .to_owned();
 
@@ -156,9 +139,41 @@ impl DomainRuleTreeNode {
     pub fn zone(&self) -> Option<&Arc<DomainRuleTreeNode>> {
         self.zone.as_ref()
     }
+}
 
-    pub fn get<T>(&self, f: impl Fn(&Self) -> Option<T>) -> Option<T> {
-        f(self).or_else(|| self.zone().map(|z| f(z)).unwrap_or_default())
+pub trait DomainRuleGetter {
+    fn get<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<T>) -> Option<T>;
+
+    fn get_ref<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<&T>) -> Option<&T>;
+}
+
+impl DomainRuleGetter for DomainRuleTreeNode {
+    fn get<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<T>) -> Option<T> {
+        f(self).or_else(|| self.zone().and_then(|z| f(z)))
+    }
+
+    fn get_ref<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<&T>) -> Option<&T> {
+        f(self).or_else(|| self.zone().and_then(|z| f(z)))
+    }
+}
+
+impl<N: AsRef<DomainRuleTreeNode>> DomainRuleGetter for N {
+    fn get<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<T>) -> Option<T> {
+        self.as_ref().get(f)
+    }
+
+    fn get_ref<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<&T>) -> Option<&T> {
+        self.as_ref().get_ref(f)
+    }
+}
+
+impl DomainRuleGetter for Option<Arc<DomainRuleTreeNode>> {
+    fn get<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<T>) -> Option<T> {
+        self.as_deref().and_then(f)
+    }
+
+    fn get_ref<T>(&self, f: impl Fn(&DomainRuleTreeNode) -> Option<&T>) -> Option<&T> {
+        self.as_deref().and_then(f)
     }
 }
 
@@ -199,7 +214,7 @@ impl From<&Name> for crate::collections::TrieKey<Name> {
 #[cfg(test)]
 mod tests {
 
-    use crate::config::{AddressRule, DomainAddress};
+    use crate::config::{AddressRule, AddressRuleValue};
     use std::{net::Ipv4Addr, ptr};
 
     use super::*;
@@ -207,21 +222,33 @@ mod tests {
     #[test]
     fn test_zone_rule() {
         let map = DomainRuleMap::create(
+            &mut Default::default(),
             &Default::default(),
             &vec![
                 AddressRule {
                     domain: "a.b.c.www.example.com".parse().unwrap(),
-                    address: DomainAddress::IPv4(Ipv4Addr::LOCALHOST),
+                    address: AddressRuleValue::Addr {
+                        v4: Some([Ipv4Addr::LOCALHOST].into()),
+                        v6: None,
+                    },
                 },
                 AddressRule {
                     domain: "www.example.com".parse().unwrap(),
-                    address: DomainAddress::IPv4(Ipv4Addr::LOCALHOST),
+                    address: AddressRuleValue::Addr {
+                        v4: Some([Ipv4Addr::LOCALHOST].into()),
+                        v6: None,
+                    },
                 },
                 AddressRule {
                     domain: "example.com".parse().unwrap(),
-                    address: DomainAddress::IPv4(Ipv4Addr::LOCALHOST),
+                    address: AddressRuleValue::Addr {
+                        v4: Some([Ipv4Addr::LOCALHOST].into()),
+                        v6: None,
+                    },
                 },
             ],
+            &Default::default(),
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
